@@ -19,13 +19,18 @@ Then POST two XML files:
       -F "ignore_fields=CreatedAt,UpdatedAt"
 """
 
+from pathlib import Path
+
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from comparator.comparison_engine import compare_xml_trees
 from models.schemas import ComparisonConfig, ComparisonResponse
+from normalizer.xml_to_csv import convert as xml_to_csv
 from parser.xml_parser import XMLParseError, parse_xml_bytes
 from reporter.report_generator import generate_report
+
+OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 
 app = FastAPI(
     title="XML Comparison API",
@@ -126,6 +131,43 @@ async def compare_xml(
 
     # ── Report ────────────────────────────────────────────────────────────
     return generate_report(differences)
+
+
+@app.post(
+    "/xml-to-csv",
+    summary="Convert XML to a flat sorted CSV",
+    responses={
+        200: {"description": "CSV file with every leaf value, sorted by policy number."},
+        422: {"description": "Uploaded file is not valid XML."},
+    },
+)
+async def xml_to_csv_endpoint(
+    file: UploadFile = File(..., description="XML file to normalise"),
+) -> FileResponse:
+    """
+    Flatten every leaf value in the XML into a CSV file and return it.
+
+    - One row per leaf node — nothing is skipped.
+    - Full dot-path recorded (e.g. `Document.Correspondence[0].PartyInfo[1].GivenName`).
+    - Sorted by **policy_number** then **full_path**.
+    - Saved as `<original_name>.csv` in the server's `output/` directory.
+    """
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=422, detail="Uploaded file is empty.")
+
+    original_name = file.filename or "output.xml"
+
+    try:
+        csv_path = xml_to_csv(content, original_name, OUTPUT_DIR)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    return FileResponse(
+        path=str(csv_path),
+        media_type="text/csv",
+        filename=csv_path.name,
+    )
 
 
 @app.get("/health", summary="Health check", include_in_schema=False)
